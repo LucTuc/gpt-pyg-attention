@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch_geometric.nn import GATConv
-from torch_geometric.data import Data, DataLoader
 
 # hyperparameters
 batch_size = 32 # how many independent sequences will we process in parallel?
 block_size = 8 # what is the maximum context length for predictions?
-max_iters = 5000
+max_iters = 500
 eval_interval = 500
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -53,73 +52,16 @@ def get_batch(split):
 def estimate_loss():
     out = {}
     model.eval()
+    edge_index = build_edge_index(block_size).to(device)
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            logits, loss = model(X, Y)
+            logits, loss = model(X, edge_index, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
-
-def create_pyg_obj(x):
-    B, T, C = x.shape
-    edge_index = []
-    for i in range (T):
-        for j in range(i, T):
-            edge_index.append([i, j])
-    
-    graphs = []
-    for b in range(B):
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().to(x.device)
-        graphs.append(Data(x=x[b], edge_index=edge_index))
-    
-    #return dataloader containing graphs
-    return DataLoader(graphs, batch_size=batch_size)
-
-
-class GraphAttentionHead(torch.nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(GraphAttentionHead, self).__init__()
-
-        self.attention = GATConv(in_channels, out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.attention(x, edge_index)
-        return x
-
-class GraphMultiHeadAttention(torch.nn.Module):
-    def __init__(self, num_heads, in_channels, out_channels):
-        super(GraphMultiHeadAttention, self).__init__()
-
-        self.heads = torch.nn.ModuleList()
-        for _ in range(num_heads):
-            self.heads.append(GraphAttentionHead(in_channels, out_channels))
-        
-        self.proj = torch.nn.Linear(num_heads * out_channels, in_channels)
-
-    def forward(self, x):
-        B, T, C = x.shape
-        out = []
-
-        for b in range(B):
-            # Construct edge index for a directed graph of size T.
-            edge_index = []
-            for i in range(T):
-                for j in range(i, T):
-                    edge_index.append([i, j])
-            edge_index = torch.tensor(edge_index, dtype=torch.long).t().to(x.device)
-            
-            # Apply each attention head to the graph.
-            h_out = torch.cat([head(x[b], edge_index) for head in self.heads], dim=-1)
-
-            out.append(h_out)
-
-        out = torch.stack(out, dim=0)
-
-        out = self.proj(out)
-        return out
 
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
@@ -136,21 +78,40 @@ class FeedFoward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+def build_edge_index(block_size):
+    edge_index = []
+    for i in range(block_size):
+        for j in range(i, block_size):
+            edge_index.append([i, j])
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t()
+    return edge_index
+
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
     def __init__(self, n_embd, n_head):
-        # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
+        self.gat = GATConv(n_embd, head_size, heads=n_head, dropout=dropout)
         self.ffwd = FeedFoward(n_embd)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))
+    def forward(self, x, edge_index):
+        B, T, C = x.shape
+
+        # Adjust the edge_index for batch processing
+        edge_index = edge_index + T * torch.arange(B, device=edge_index.device).view(-1, 1, 1)
+
+        # Reshape x and edge_index to match GATConv's expected input format
+        x = x.view(B * T, C)
+        edge_index = edge_index.reshape(2, -1)
+
+        x = x + self.dropout(self.gat(self.ln1(x), edge_index))
+        x = x.view(B, T, C)  # reshape back to original
         x = x + self.ffwd(self.ln2(x))
+
         return x
 
 class GPTLanguageModel(nn.Module):
@@ -160,7 +121,7 @@ class GPTLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.blocks = nn.ModuleList([Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
@@ -175,14 +136,15 @@ class GPTLanguageModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, edge_index, targets=None):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
-        x = self.blocks(x) # (B,T,C)
+        for block in self.blocks:
+            x = block(x, edge_index) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
@@ -201,8 +163,10 @@ class GPTLanguageModel(nn.Module):
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
+            # build the edge_index tensor for the current sequence
+            edge_index = build_edge_index(idx_cond.shape[1]).to(device)
             # get the predictions
-            logits, loss = self(idx_cond)
+            logits, loss = self(idx_cond, edge_index)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
             # apply softmax to get probabilities
@@ -230,9 +194,10 @@ for iter in range(max_iters):
 
     # sample a batch of data
     xb, yb = get_batch('train')
+    edge_index = build_edge_index(block_size).to(device)
 
     # evaluate the loss
-    logits, loss = model(xb, yb)
+    logits, loss = model(xb, edge_index, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
