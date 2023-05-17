@@ -1,15 +1,29 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import wandb
+
+# Initialize a new wandb run
+wandb.init(project='gpt_gat')
 
 # hyperparameters
 batch_size = 32 # how many independent sequences will we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
-max_iters = 3000
-eval_interval = 300
+block_size = 128 # what is the maximum context length for predictions?
+max_iters = 5001
+eval_interval = 50
 learning_rate = 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
+
+# Define config
+config = wandb.config
+config.batch_size = batch_size
+config.block_size = block_size
+config.max_iters = max_iters
+config.eval_interval = eval_interval
+config.learning_rate = learning_rate
+config.device = device
+config.eval_iters = eval_iters
 # ------------
 
 torch.manual_seed(1337)
@@ -98,6 +112,9 @@ class BigramLanguageModel(nn.Module):
 model = BigramLanguageModel(vocab_size)
 m = model.to(device)
 
+# Log the model
+wandb.watch(model)
+
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -107,6 +124,9 @@ for iter in range(max_iters):
     if iter % eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+        # Log losses to wandb
+        wandb.log({"Train Loss": losses['train'], "Val Loss": losses['val']})
 
     # sample a batch of data
     xb, yb = get_batch('train')

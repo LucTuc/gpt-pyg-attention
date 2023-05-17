@@ -1,19 +1,39 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import wandb
+import sys
+
+wandb.login()
+# Initialize a new wandb run
+wandb.init(project='gpt_gat')
 
 # hyperparameters
-batch_size = 32 # how many independent sequences will we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
-max_iters = 500
-eval_interval = 500
+batch_size = 64 # how many independent sequences will we process in parallel?
+block_size = 128 # what is the maximum context length for predictions?
+max_iters = 5000
+eval_interval = 50
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
-n_head = 4
-n_layer = 4
+n_head = 6
+n_layer = 6
 dropout = 0.2
+
+# Define config
+config = wandb.config
+config.batch_size = batch_size
+config.block_size = block_size
+config.max_iters = max_iters
+config.eval_interval = eval_interval
+config.learning_rate = learning_rate
+config.device = device
+config.eval_iters = eval_iters
+config.n_embd = n_embd
+config.n_head = n_head
+config.n_layer = n_layer
+config.dropout = dropout
 # ------------
 
 torch.manual_seed(1337)
@@ -197,6 +217,10 @@ class GPTLanguageModel(nn.Module):
 
 model = GPTLanguageModel()
 m = model.to(device)
+
+# Log the model
+wandb.watch(model)
+
 # print the number of parameters in the model
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
@@ -210,6 +234,9 @@ for iter in range(max_iters):
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
+        # Log losses to wandb
+        wandb.log({"Train Loss": losses['train'], "Val Loss": losses['val']})
+
     # sample a batch of data
     xb, yb = get_batch('train')
 
@@ -222,4 +249,7 @@ for iter in range(max_iters):
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+
+torch.save(model.state_dict(), 'model_weights.pth')
+wandb.save('model_weights.pth')
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
