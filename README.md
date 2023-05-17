@@ -31,7 +31,7 @@ The following plot shows the validation losses for the different models. They we
 
 GATv2, which fixes the static attention issue of vanilla GAT, reaches a similary low loss as the original transformer implementation. You can look at example outputs of all models in the model_outputs folder. Although they all produce non-sense, there is a very obvious improvements in the models that use attention over the simple bigram model, and it undoubtedly starts to resemble Shakespeare's style.
 
-Note that I trained these models on A100 GPU, so reproduction on your local machine might require downsizing the model parameters quite a bit.
+Note that I trained these models on an A100 GPU, so reproduction on your local machine might require downsizing the model parameters quite a bit.
 
 ## Acknowledgements 
-This codebase and specifically the `gpt.py` and `bigram.py` code was originally created in the [Neural Networks: Zero To Hero](https://karpathy.ai/zero-to-hero.html) video lecture series by Andrej Karpathy, specifically on the first lecture on nanoGPT. Many thanks to him for making the code available and teaching me the the basics of LLMs in an intuitive manner.
+This codebase and specifically the `gpt.py` and `bigram.py` code was originally created in the [Neural Networks: Zero To Hero](https://karpathy.ai/zero-to-hero.html) video lecture series by Andrej Karpathy, specifically on the first lecture on nanoGPT. Many thanks to him for making the code available and teaching me the basics of LLMs in an intuitive manner.
